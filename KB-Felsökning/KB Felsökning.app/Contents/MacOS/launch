@@ -1,0 +1,25 @@
+#!/bin/bash
+# Startar KB Felsökning i bakgrunden (native, ingen Rosetta) och öppnar webbläsaren.
+# Kräver ingen terminal och ingen Claude-app. Anropas t.ex. av tangentbordsgenvägen
+# (Genvägar ⇧⌘K), Dock eller Spotlight.
+
+DIR="/Applications/KB-Transkribering/KB-Felsökning"
+URL="http://127.0.0.1:8725/"
+
+# Första gången (ingen miljö byggd än): kör det synliga engångs-installet.
+if [ ! -d "$DIR/.venv" ]; then
+  open "$DIR/Starta Felsökning.command"
+  exit 0
+fi
+
+# Starta servern om den inte redan svarar.
+if ! curl -s -o /dev/null "http://127.0.0.1:8725/health"; then
+  KB_NO_OPEN=1 nohup "$DIR/.venv/bin/python" "$DIR/app.py" >/tmp/kb-felsokning.log 2>&1 &
+  for _ in $(seq 1 50); do
+    curl -s -o /dev/null "http://127.0.0.1:8725/health" && break
+    sleep 0.3
+  done
+fi
+
+# Öppna helst i Chrome (bäst för skärminspelning), annars standardwebbläsaren.
+open -a "Google Chrome" "$URL" 2>/dev/null || open "$URL"
