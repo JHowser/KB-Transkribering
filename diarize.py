@@ -55,9 +55,13 @@ def get_diarizer():
         import torch
         from pyannote.audio import Pipeline
 
-        pipe = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1", use_auth_token=token
-        )
+        model_id = "pyannote/speaker-diarization-3.1"
+        try:
+            # pyannote.audio >= 4 (och nyare huggingface_hub) använder token=
+            pipe = Pipeline.from_pretrained(model_id, token=token)
+        except TypeError:
+            # pyannote.audio 3.x använder use_auth_token=
+            pipe = Pipeline.from_pretrained(model_id, use_auth_token=token)
         if pipe is None:
             # from_pretrained returnerar None när villkoren inte är godkända eller
             # token saknar behörighet.
