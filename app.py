@@ -12,6 +12,8 @@ import urllib.request
 
 from flask import Flask, request, jsonify, Response
 
+import diarize  # lätt modul (endast os på toppnivå); tunga importer sker lazy inuti
+
 # q5_0 = liten nedladdning (~1,1 GB), full noggrannhet, snabb på Metal.
 MODEL_URL = "https://huggingface.co/KBLab/kb-whisper-large/resolve/main/ggml-model-q5_0.bin"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -24,13 +26,14 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB
 
 JOB = {
-    "state": "idle",   # idle | downloading | loading_model | working | done | error
+    "state": "idle",   # idle | downloading | loading_model | working | diarizing | done | error
     "progress": 0.0,
     "position": 0.0,
     "duration": 0.0,
     "text": "",
     "filename": "",
     "error": "",
+    "note": "",        # kort meddelande, t.ex. när talaridentifiering inte är tillgänglig
 }
 LOCK = threading.Lock()
 _model = None
@@ -161,10 +164,48 @@ def _paragraphs(segments):
     return "".join(parts).strip()
 
 
-def _transcribe(path, filename):
+def _segments(raw):
+    """Strukturera whisper.cpp-segmenten till [(start, end, text)] för mergning."""
+    out = []
+    for s in raw:
+        t = _text(s)
+        if t:
+            out.append((_start(s), _end(s), t))
+    return out
+
+
+def _diarize_and_label(audio, segments, samples):
+    """Diariserar ljudet, slår ihop med ASR-segmenten och (om röstprover finns)
+    märker klustren med riktiga namn. Kastar vidare om diarisering inte går."""
+    import diarize
+    import merge
+
+    turns = diarize.diarize(audio, SR)
+    if not turns:
+        raise RuntimeError("Diariseringen hittade inga talarturer.")
+
+    labeled = merge.assign_speakers(segments, turns)
+    groups = merge.group_turns(labeled)
+
+    names = {}
+    if samples:
+        try:
+            import enroll
+            enrollment = enroll.build_enrollment(samples)
+            centroids = enroll.cluster_centroids(audio, turns, SR)
+            names = enroll.match_clusters(centroids, enrollment)
+        except Exception:  # noqa: BLE001 — röstprover är en bonus; fall tillbaka
+            names = {}                                     # till generiska etiketter
+
+    return merge.render_transcript(groups, names)
+
+
+def _transcribe(path, filename, sample_paths=None):
+    sample_paths = sample_paths or []
     try:
         _set(state="downloading" if not os.path.exists(MODEL_PATH) else "loading_model",
-             progress=0.0, position=0.0, duration=0.0, text="", error="", filename=filename)
+             progress=0.0, position=0.0, duration=0.0, text="", error="", note="",
+             filename=filename)
 
         if not os.path.exists(MODEL_PATH):
             _download_model()
@@ -173,7 +214,6 @@ def _transcribe(path, filename):
         model = _load_model()
 
         audio = _decode(path)
-        import numpy as np
         duration = float(len(audio)) / SR if len(audio) else 0.0
         if duration <= 0:
             raise RuntimeError("Kunde inte läsa ljudet ur filen.")
@@ -185,15 +225,41 @@ def _transcribe(path, filename):
                 if duration > 0:
                     JOB["progress"] = max(0.0, min(1.0, _end(seg) / duration))
 
-        segments = model.transcribe(audio, language="sv", new_segment_callback=on_segment)
-        _set(state="done", progress=1.0, text=_paragraphs(segments))
+        raw = model.transcribe(audio, language="sv", new_segment_callback=on_segment)
+        segments = _segments(raw)
+
+        # Avkoda ev. röstprover först nu (i arbetstråden), så uppladdningen går fort.
+        samples = []
+        for name, spath in sample_paths:
+            try:
+                wav = _decode(spath)
+                if len(wav):
+                    samples.append((name, wav))
+            except Exception:  # noqa: BLE001 — hoppa över trasiga prover
+                pass
+
+        # Talaridentifiering är valfri och får aldrig fälla hela transkriberingen.
+        text = _paragraphs(raw)
+        note = ""
+        try:
+            _set(state="diarizing", progress=1.0, position=duration)
+            text = _diarize_and_label(audio, segments, samples)
+        except diarize.DiarizationUnavailable:
+            note = "Talaridentifiering ej tillgänglig — visar text utan talare."
+        except ImportError:
+            note = "Talaridentifiering ej installerad — visar text utan talare."
+        except Exception:  # noqa: BLE001
+            note = "Talaridentifiering misslyckades — visar text utan talare."
+
+        _set(state="done", progress=1.0, text=text, note=note)
     except Exception as exc:  # noqa: BLE001
         _set(state="error", error=str(exc))
     finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+        for p in [path] + [sp for _n, sp in sample_paths]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
 
 @app.route("/")
@@ -201,19 +267,38 @@ def index():
     return Response(PAGE, mimetype="text/html")
 
 
-@app.route("/transcribe", methods=["POST"])
-def transcribe():
-    with LOCK:
-        if JOB["state"] in ("downloading", "loading_model", "working"):
-            return jsonify(ok=False, error="En transkribering pågår redan."), 409
-    f = request.files.get("file")
-    if not f or not f.filename:
-        return jsonify(ok=False, error="Ingen fil mottagen."), 400
+def _save_upload(f):
     suffix = os.path.splitext(f.filename)[1] or ".m4a"
     fd, path = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
     f.save(path)
-    threading.Thread(target=_transcribe, args=(path, f.filename), daemon=True).start()
+    return path
+
+
+@app.route("/transcribe", methods=["POST"])
+def transcribe():
+    with LOCK:
+        if JOB["state"] in ("downloading", "loading_model", "working", "diarizing"):
+            return jsonify(ok=False, error="En transkribering pågår redan."), 409
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify(ok=False, error="Ingen fil mottagen."), 400
+    path = _save_upload(f)
+
+    # Valfria röstprover: parallella listor sample_name[] / sample_file[].
+    sample_paths = []
+    sample_files = request.files.getlist("sample_file")
+    sample_names = request.form.getlist("sample_name")
+    for i, sf in enumerate(sample_files):
+        if not sf or not sf.filename:
+            continue
+        name = (sample_names[i] if i < len(sample_names) else "").strip()
+        if not name:
+            continue
+        sample_paths.append((name, _save_upload(sf)))
+
+    threading.Thread(target=_transcribe, args=(path, f.filename, sample_paths),
+                     daemon=True).start()
     return jsonify(ok=True)
 
 
@@ -226,10 +311,10 @@ def status():
 @app.route("/reset", methods=["POST"])
 def reset():
     with LOCK:
-        if JOB["state"] in ("downloading", "loading_model", "working"):
+        if JOB["state"] in ("downloading", "loading_model", "working", "diarizing"):
             return jsonify(ok=False), 409
         JOB.update(state="idle", progress=0.0, position=0.0, duration=0.0,
-                   text="", filename="", error="")
+                   text="", filename="", error="", note="")
     return jsonify(ok=True)
 
 
@@ -272,6 +357,26 @@ PAGE = r"""<!doctype html>
   .spinner{display:inline-block; width:13px; height:13px; margin-right:7px; vertical-align:-2px;
     border:2px solid var(--accent-soft); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
+  .who{margin-top:16px}
+  .who-head{font-size:12.5px; color:var(--muted); line-height:1.5}
+  .enroll{margin-top:8px}
+  .enroll summary{font-size:13px; font-weight:550; color:var(--accent); cursor:pointer; list-style:none;
+    display:inline-block; padding:2px 0}
+  .enroll summary::-webkit-details-marker{display:none}
+  .enroll summary::before{content:"＋ "; font-weight:600}
+  .enroll[open] summary::before{content:"－ "}
+  .who-hint{font-size:12px; color:var(--muted); line-height:1.5; margin:8px 0 12px}
+  .srow{display:flex; gap:8px; align-items:center; margin-bottom:8px}
+  .srow input[type=text]{flex:1; min-width:0; border:1px solid var(--line); border-radius:8px;
+    padding:8px 10px; font-family:var(--ui); font-size:13px; color:var(--ink); background:#fff}
+  .srow input[type=text]:focus{outline:none; border-color:var(--accent)}
+  .srow .pick{white-space:nowrap; max-width:150px; overflow:hidden; text-overflow:ellipsis; padding:8px 10px; font-size:12.5px}
+  .srow .pick.has{border-color:var(--accent); color:var(--accent)}
+  .srow .rm{padding:8px 11px; font-size:14px; line-height:1; color:var(--muted)}
+  button.ghost{background:transparent; border:1px dashed var(--line); color:var(--accent); font-size:12.5px; padding:8px 12px}
+  button.ghost:hover{background:var(--accent-soft); border-color:var(--accent)}
+  .notice{background:var(--accent-soft); border:1px solid var(--line); border-radius:9px;
+    padding:9px 12px; font-size:12.5px; color:var(--ink); margin-bottom:10px; line-height:1.5}
   .result .name{font-size:13px; color:var(--muted); margin-bottom:10px; word-break:break-all}
   textarea{width:100%; height:300px; resize:vertical; border:1px solid var(--line); border-radius:10px;
     padding:14px 16px; font-family:var(--ui); font-size:14px; line-height:1.65; color:var(--ink); background:#fff;}
@@ -302,6 +407,18 @@ PAGE = r"""<!doctype html>
         <div class="small">eller klicka för att välja · m4a, mp3, wav, mp4</div>
       </label>
       <input type="file" id="file" accept="audio/*,video/mp4,.m4a,.mp3,.wav,.mp4">
+
+      <div class="who">
+        <div class="who-head">Repliker märks automatiskt per talare (Talare 1, Talare 2 …).</div>
+        <details class="enroll">
+          <summary>Lägg till röstprover (valfritt)</summary>
+          <p class="who-hint">Ladda upp en kort inspelning (10–20 sek) där bara personen pratar,
+            så märks repliker med namn i stället för "Talare 1". Lägg till personerna innan du
+            släpper in mötesinspelningen.</p>
+          <div id="samples"></div>
+          <button type="button" id="addPerson" class="ghost">+ Lägg till person</button>
+        </details>
+      </div>
     </section>
 
     <section id="working" class="work hidden">
@@ -315,6 +432,7 @@ PAGE = r"""<!doctype html>
 
     <section id="done" class="result hidden">
       <div class="name" id="doneName"></div>
+      <div class="notice hidden" id="doneNote"></div>
       <textarea id="out" spellcheck="false"></textarea>
       <div class="actions">
         <button class="primary grow" id="download">Ladda ner .txt</button>
@@ -339,6 +457,40 @@ const drop = $("drop"), fileInput = $("file");
 ["dragleave","drop"].forEach(e => drop.addEventListener(e, ev => {ev.preventDefault(); drop.classList.remove("over");}));
 drop.addEventListener("drop", ev => { const f = ev.dataTransfer.files[0]; if (f) upload(f); });
 fileInput.addEventListener("change", () => { if (fileInput.files[0]) upload(fileInput.files[0]); });
+
+// Röstprover (valfritt): rader med [Namn] [Ljudklipp].
+function addPerson(){
+  const row = document.createElement("div");
+  row.className = "srow";
+  const name = document.createElement("input");
+  name.type = "text"; name.placeholder = "Namn"; name.className = "sname";
+  const pick = document.createElement("button");
+  pick.type = "button"; pick.className = "pick"; pick.textContent = "Välj ljudklipp";
+  const fin = document.createElement("input");
+  fin.type = "file"; fin.className = "sfile";
+  fin.accept = "audio/*,video/mp4,.m4a,.mp3,.wav,.mp4"; fin.style.display = "none";
+  pick.addEventListener("click", () => fin.click());
+  fin.addEventListener("change", () => {
+    if (fin.files[0]){ pick.textContent = fin.files[0].name; pick.classList.add("has"); }
+  });
+  const rm = document.createElement("button");
+  rm.type = "button"; rm.className = "rm"; rm.textContent = "✕"; rm.title = "Ta bort";
+  rm.addEventListener("click", () => row.remove());
+  row.append(name, pick, fin, rm);
+  $("samples").appendChild(row);
+  name.focus();
+}
+$("addPerson").addEventListener("click", addPerson);
+function collectSamples(){
+  const out = [];
+  document.querySelectorAll("#samples .srow").forEach(row => {
+    const name = row.querySelector(".sname").value.trim();
+    const file = row.querySelector(".sfile").files[0];
+    if (name && file) out.push({name, file});
+  });
+  return out;
+}
+
 function fmt(s){ s = Math.max(0, Math.round(s||0)); const m = Math.floor(s/60), x = s%60; return m+":"+String(x).padStart(2,"0"); }
 let currentName = "transkribering";
 async function upload(file){
@@ -349,6 +501,7 @@ async function upload(file){
   $("workTime").textContent = "";
   show("working");
   const fd = new FormData(); fd.append("file", file);
+  collectSamples().forEach(s => { fd.append("sample_name", s.name); fd.append("sample_file", s.file); });
   const r = await fetch("/transcribe", {method:"POST", body:fd});
   if (!r.ok){ const j = await r.json().catch(()=>({})); fail(j.error || "Kunde inte starta."); return; }
   poll();
@@ -374,8 +527,17 @@ function poll(){
       $("workState").innerHTML = '<span class="spinner"></span>Transkriberar…';
       $("workTime").textContent = j.duration ? (fmt(j.position) + " / " + fmt(j.duration)) : "";
       poll();
+    } else if (j.state === "diarizing"){
+      $("bar").style.width = "100%";
+      $("workState").innerHTML = '<span class="spinner"></span>Identifierar talare…';
+      $("workTime").textContent = "";
+      poll();
     } else if (j.state === "done"){
-      $("bar").style.width = "100%"; $("out").value = j.text; $("doneName").textContent = j.filename; show("done");
+      $("bar").style.width = "100%"; $("out").value = j.text; $("doneName").textContent = j.filename;
+      const note = $("doneNote");
+      if (j.note){ note.textContent = j.note; note.classList.remove("hidden"); }
+      else { note.textContent = ""; note.classList.add("hidden"); }
+      show("done");
     } else if (j.state === "error"){
       fail(j.error || "Något gick fel.");
     } else { poll(); }
@@ -391,7 +553,7 @@ $("copy").addEventListener("click", async () => {
   await navigator.clipboard.writeText($("out").value);
   $("copy").textContent = "Kopierat ✓"; setTimeout(() => $("copy").textContent = "Kopiera", 1500);
 });
-async function reset(){ await fetch("/reset", {method:"POST"}); fileInput.value=""; show("idle"); }
+async function reset(){ await fetch("/reset", {method:"POST"}); fileInput.value=""; $("samples").innerHTML=""; show("idle"); }
 $("again").addEventListener("click", reset);
 $("retry").addEventListener("click", reset);
 </script>

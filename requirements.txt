@@ -1,0 +1,14 @@
+# Grund: lokal transkribering (KB-Whisper via whisper.cpp)
+flask
+pywhispercpp
+av
+numpy
+certifi
+
+# Talaridentifiering ("vem sa vad"): diarisering + röstembeddingar, körs lokalt.
+# torch drar in ett stort hjul — det är ok, allt körs på din dator.
+pyannote.audio>=3.1
+speechbrain
+scipy
+torch
+torchaudio
