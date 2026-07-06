@@ -31,14 +31,21 @@ fi
 if [ ! -d ".venv" ]; then
   echo
   echo "  Förbereder appen. Detta görs bara en gång och kan ta några minuter…"
+  echo "  (Talaridentifiering kräver några större bibliotek — ha tålamod.)"
   python3 -m venv .venv || { echo "  Kunde inte skapa miljö."; read -r; exit 1; }
   ./.venv/bin/pip install --upgrade pip >/dev/null
-  ./.venv/bin/pip install flask pywhispercpp av numpy certifi || { echo "  Installationen misslyckades."; read -r; exit 1; }
+  ./.venv/bin/pip install -r requirements.txt || { echo "  Installationen misslyckades."; read -r; exit 1; }
   echo "  Klart."
 fi
 
 # Säkerställ rotcertifikat även om miljön redan fanns sedan tidigare.
 ./.venv/bin/python -c "import certifi" >/dev/null 2>&1 || ./.venv/bin/pip install certifi >/dev/null 2>&1
+
+# Säkerställ talaridentifieringens bibliotek för miljöer som skapades innan funktionen fanns.
+if ! ./.venv/bin/python -c "import pyannote.audio" >/dev/null 2>&1; then
+  echo "  Förbereder talaridentifiering (engångsnedladdning, kan ta några minuter)…"
+  ./.venv/bin/pip install -r requirements.txt >/dev/null 2>&1
+fi
 
 echo
 echo "  Startar… ett fönster öppnas i webbläsaren."
