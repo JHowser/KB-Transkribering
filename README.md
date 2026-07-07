@@ -68,9 +68,12 @@ behöver ett konto och en token en gång. Ljudet lämnar aldrig datorn; token an
 bara för att ladda ner modellvikterna första gången.
 
 1. Skapa ett gratis konto på <https://huggingface.co/join> (hoppa över om du har ett).
-2. Godkänn villkoren på **båda** modellsidorna (logga in och tryck på knappen):
-   - <https://huggingface.co/pyannote/speaker-diarization-3.1>
-   - <https://huggingface.co/pyannote/segmentation-3.0>
+2. Godkänn villkoren på modellsidorna (logga in och tryck på knappen på varje sida).
+   Vilken pipeline som används beror på din pyannote-version — enklast är att godkänna
+   alla tre, så fungerar det oavsett:
+   - <https://huggingface.co/pyannote/speaker-diarization-community-1> (pyannote.audio 4.x)
+   - <https://huggingface.co/pyannote/speaker-diarization-3.1> (pyannote.audio 3.x)
+   - <https://huggingface.co/pyannote/segmentation-3.0> (pyannote.audio 3.x)
 3. Skapa en **read**-token: <https://huggingface.co/settings/tokens> → **New token**
    → typ **Read** → kopiera värdet (börjar med `hf_`).
 4. Gör token tillgänglig på **ett** av två sätt:

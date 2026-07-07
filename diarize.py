@@ -52,23 +52,50 @@ def get_diarizer():
         raise _pipeline_error
 
     try:
+        import warnings
+        # Vi matar in ljudet som en färdig vågform (se diarize() nedan), så pyannote
+        # avkodar aldrig filer själv. Dämpa därför torchcodec/FFmpeg-varningen som
+        # annars skräms i terminalen på pyannote.audio 4.x — den påverkar inte oss.
+        warnings.filterwarnings("ignore", message=".*torchcodec.*")
+
         import torch
+        import pyannote.audio
         from pyannote.audio import Pipeline
 
-        model_id = "pyannote/speaker-diarization-3.1"
-        try:
-            # pyannote.audio >= 4 (och nyare huggingface_hub) använder token=
-            pipe = Pipeline.from_pretrained(model_id, token=token)
-        except TypeError:
-            # pyannote.audio 3.x använder use_auth_token=
-            pipe = Pipeline.from_pretrained(model_id, use_auth_token=token)
+        # pyannote.audio 4.x döpte om standardpipelinen till "community-1"; 3.x har
+        # bara "3.1". Prova den nyare först på 4.x och fall tillbaka till 3.1.
+        ver = getattr(pyannote.audio, "__version__", "") or ""
+        major = int(ver.split(".")[0]) if ver[:1].isdigit() else 0
+        if major >= 4:
+            model_ids = ["pyannote/speaker-diarization-community-1",
+                         "pyannote/speaker-diarization-3.1"]
+        else:
+            model_ids = ["pyannote/speaker-diarization-3.1"]
+
+        pipe, load_error = None, None
+        for model_id in model_ids:
+            try:
+                try:
+                    # pyannote.audio >= 4 (och nyare huggingface_hub) använder token=
+                    pipe = Pipeline.from_pretrained(model_id, token=token)
+                except TypeError:
+                    # pyannote.audio 3.x använder use_auth_token=
+                    pipe = Pipeline.from_pretrained(model_id, use_auth_token=token)
+            except Exception as exc:  # noqa: BLE001 — prova nästa modell i listan
+                load_error = exc
+                pipe = None
+            if pipe is not None:
+                break
+
         if pipe is None:
-            # from_pretrained returnerar None när villkoren inte är godkända eller
-            # token saknar behörighet.
+            # from_pretrained returnerar None (eller kastar) när villkoren inte är
+            # godkända eller token saknar behörighet.
+            hint = (" (" + str(load_error) + ")") if load_error else ""
             raise DiarizationUnavailable(
-                "Kunde inte ladda pyannote/speaker-diarization-3.1. Kontrollera att "
-                "din token är giltig och att du godkänt villkoren på både "
-                "pyannote/speaker-diarization-3.1 och pyannote/segmentation-3.0."
+                "Kunde inte ladda talarpipelinen. Kontrollera att din token är giltig "
+                "och att du godkänt villkoren på modellsidan: pyannote.audio 4.x kräver "
+                "pyannote/speaker-diarization-community-1, medan 3.x kräver både "
+                "pyannote/speaker-diarization-3.1 och pyannote/segmentation-3.0." + hint
             )
         # MPS-stödet är ojämnt på Apple Silicon — CPU är korrekt och snabbt nog.
         pipe.to(torch.device("cpu"))
