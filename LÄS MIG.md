@@ -3,6 +3,11 @@
 Transkriberar svenska möten lokalt på din Mac med KB-Whisper (large).
 Körs på din GPU via Metal (whisper.cpp). Inget ljud lämnar datorn.
 
+Appen har tre flikar:
+- **Felsökning** — spela in skärm + röst för en webbplats → färdig handoff till Claude.
+- **Transkribera** — dra in en ljudfil → ren text.
+- **Talaridentifiering** — text märkt per talare ("Talare 1", "Talare 2" …).
+
 ## Så här gör du
 
 1. **En gång:** installera Python 3 om du inte redan har det:
@@ -14,7 +19,9 @@ Körs på din GPU via Metal (whisper.cpp). Inget ljud lämnar datorn.
    - Saknar du Apples utvecklarverktyg dyker en ruta upp – klicka **Installera**,
      vänta tills den är klar, och dubbelklicka sedan på filen igen.
 
-3. Ett fönster öppnas i webbläsaren. Dra in din ljudfil. Klart.
+3. Ett fönster öppnas i webbläsaren med de tre flikarna. Dra in din ljudfil under
+   **Transkribera** eller **Talaridentifiering**, eller spela in en webbplats under
+   **Felsökning**. Klart.
 
 ## Bra att veta
 

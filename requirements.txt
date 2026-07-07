@@ -5,6 +5,9 @@ av
 numpy
 certifi
 
+# Felsökningsläget: skärmbilder klipps ur inspelningen (Pillow).
+pillow
+
 # Talaridentifiering ("vem sa vad"): diarisering + röstembeddingar, körs lokalt.
 # torch drar in ett stort hjul — det är ok, allt körs på din dator.
 pyannote.audio>=3.1
