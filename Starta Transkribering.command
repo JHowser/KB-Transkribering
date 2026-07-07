@@ -41,6 +41,9 @@ fi
 # Säkerställ rotcertifikat även om miljön redan fanns sedan tidigare.
 ./.venv/bin/python -c "import certifi" >/dev/null 2>&1 || ./.venv/bin/pip install certifi >/dev/null 2>&1
 
+# Säkerställ Pillow (felsökningsläget klipper ut skärmbilder) för äldre miljöer.
+./.venv/bin/python -c "import PIL" >/dev/null 2>&1 || ./.venv/bin/pip install pillow >/dev/null 2>&1
+
 # Säkerställ talaridentifieringens bibliotek för miljöer som skapades innan funktionen fanns.
 if ! ./.venv/bin/python -c "import pyannote.audio" >/dev/null 2>&1; then
   echo "  Förbereder talaridentifiering (engångsnedladdning, kan ta några minuter)…"

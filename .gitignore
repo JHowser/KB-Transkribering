@@ -5,6 +5,9 @@ model/
 # Hugging Face-token för talaridentifiering (privat)
 hf_token.txt
 
+# Felsökningslägets lokala inställningar (din valda projektmapp)
+.felsokning_config.json
+
 # Session outputs (recordings, screenshots/frames, context)
 sessions/
 **/sessions/
