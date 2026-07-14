@@ -12,6 +12,8 @@ Appen samlar tre lägen under varsin flik:
   2. Transkribera — dra in en mötesinspelning och få tillbaka ren text.
   3. Talaridentifiering — som Transkribera men texten märks per talare ("Talare 1",
      "Talare 2" …) med diarisering (pyannote). Valfria röstprover ger riktiga namn (ECAPA).
+     Flera mötesinspelningar kan laddas upp samtidigt — de läggs i kö och körs en i
+     taget (praktiskt för långa nattkörningar).
 """
 
 import os
@@ -189,6 +191,12 @@ JOB = {
     "filename": "",
     "error": "",
     "note": "",           # kort meddelande, t.ex. när talaridentifiering inte är tillgänglig
+    # Batch-kö (talaridentifiering): flera möten kan laddas upp samtidigt och
+    # bearbetas då ett i taget.
+    "queue": [],          # filnamn som väntar i kön
+    "batch_index": 0,     # 1-baserat index för filen som bearbetas just nu
+    "batch_total": 0,     # totalt antal filer i batchen
+    "results": [],        # färdiga resultat i körordning: {filename, text, note, error}
 }
 LOCK = threading.Lock()
 _model = None
@@ -558,6 +566,15 @@ def _save_upload(f):
     return path
 
 
+def _copy_temp(path):
+    """Kopiera en tillfällig fil (röstprover delas av flera köade jobb; varje
+    jobb får en egen kopia så att den kan raderas när jobbet är klart)."""
+    fd, dst = tempfile.mkstemp(suffix=os.path.splitext(path)[1])
+    os.close(fd)
+    shutil.copyfile(path, dst)
+    return dst
+
+
 # ── Bakgrundsjobb ──
 
 def _transcribe_only(path, filename):
@@ -590,9 +607,17 @@ def _transcribe_only(path, filename):
             pass
 
 
-def _diarize_job(path, filename, sample_paths=None):
-    """Talaridentifiering-fliken: transkribering märkt per talare, med valfria röstprover."""
-    sample_paths = sample_paths or []
+# Talaridentifiering körs som en kö: flera mötesinspelningar kan laddas upp
+# samtidigt (eller läggas till medan en körning pågår) och bearbetas ett i taget
+# av en enda arbetstråd. Resultaten samlas i körordning.
+DIARIZE_QUEUE = []    # väntande jobb: {"path", "filename", "sample_paths"}
+DIARIZE_RESULTS = []  # färdiga resultat: {"filename", "text", "note", "error"}
+_diarize_worker_on = False
+
+
+def _diarize_one(path, filename, sample_paths):
+    """Bearbeta EN mötesinspelning (transkribering + diarisering, med valfria
+    röstprover). Returnerar (text, note); fel kastas vidare till kö-arbetaren."""
     try:
         _set(state="downloading" if not os.path.exists(MODEL_PATH) else "loading_model",
              mode="diarize", stage="", progress=0.0, position=0.0, duration=0.0,
@@ -637,15 +662,44 @@ def _diarize_job(path, filename, sample_paths=None):
         except Exception:  # noqa: BLE001
             note = "Talaridentifiering misslyckades — visar text utan talare."
 
-        _set(state="done", progress=1.0, text=text, note=note)
-    except Exception as exc:  # noqa: BLE001
-        _set(state="error", error=str(exc))
+        return text, note
     finally:
         for p in [path] + [sp for _n, sp in sample_paths]:
             try:
                 os.remove(p)
             except OSError:
                 pass
+
+
+def _diarize_worker():
+    """Kö-arbetare: kör jobben i DIARIZE_QUEUE ett i taget tills kön är tom.
+    Ett fel i en fil stoppar inte resten av kön (viktigt vid nattkörningar)."""
+    global _diarize_worker_on
+    while True:
+        with LOCK:
+            job = DIARIZE_QUEUE.pop(0) if DIARIZE_QUEUE else None
+            if job is None:
+                _diarize_worker_on = False
+                if len(DIARIZE_RESULTS) == 1 and DIARIZE_RESULTS[0]["error"]:
+                    # En ensam fil som gick fel beter sig som tidigare (felvy).
+                    JOB.update(state="error", error=DIARIZE_RESULTS[0]["error"])
+                else:
+                    JOB.update(state="done", progress=1.0)
+                return
+            JOB["batch_index"] += 1
+            JOB["queue"] = [j["filename"] for j in DIARIZE_QUEUE]
+
+        try:
+            text, note = _diarize_one(job["path"], job["filename"], job["sample_paths"])
+            result = {"filename": job["filename"], "text": text, "note": note, "error": ""}
+        except Exception as exc:  # noqa: BLE001
+            result = {"filename": job["filename"], "text": "", "note": "", "error": str(exc)}
+
+        with LOCK:
+            DIARIZE_RESULTS.append(result)
+            JOB["results"] = list(DIARIZE_RESULTS)
+            JOB["text"] = result["text"]
+            JOB["note"] = result["note"]
 
 
 def _prepare_handoff(video_path, session_dir, video_ext):
@@ -791,15 +845,19 @@ def transcribe():
 
 @app.route("/diarize", methods=["POST"])
 def diarize_route():
-    with LOCK:
-        if _busy():
-            return jsonify(ok=False, error="En körning pågår redan."), 409
-    f = request.files.get("file")
-    if not f or not f.filename:
+    """Talaridentifiering. Tar emot en eller flera mötesinspelningar (file[]);
+    flera filer läggs i kö och körs en i taget. Fler filer kan även läggas till
+    medan en kö-körning pågår — de hamnar då sist i kön."""
+    global _diarize_worker_on
+    files = [f for f in request.files.getlist("file") if f and f.filename]
+    if not files:
         return jsonify(ok=False, error="Ingen fil mottagen."), 400
-    path = _save_upload(f)
+    with LOCK:
+        if _busy() and not (JOB["mode"] == "diarize" and _diarize_worker_on):
+            return jsonify(ok=False, error="En körning pågår redan."), 409
 
     # Valfria röstprover: parallella listor sample_name[] / sample_file[].
+    # Proverna gäller alla filer i denna uppladdning.
     sample_paths = []
     sample_files = request.files.getlist("sample_file")
     sample_names = request.form.getlist("sample_name")
@@ -811,9 +869,38 @@ def diarize_route():
             continue
         sample_paths.append((name, _save_upload(sf)))
 
-    threading.Thread(target=_diarize_job, args=(path, f.filename, sample_paths),
-                     daemon=True).start()
-    return jsonify(ok=True)
+    jobs = []
+    for i, f in enumerate(files):
+        # Varje jobb äger (och raderar) sina egna proverfiler — kopiera för alla
+        # utom det första jobbet.
+        sp = sample_paths if i == 0 else [(n, _copy_temp(p)) for n, p in sample_paths]
+        jobs.append({"path": _save_upload(f), "filename": f.filename, "sample_paths": sp})
+
+    start = False
+    with LOCK:
+        if not _diarize_worker_on:
+            if _busy():  # en annan flik hann starta medan filerna sparades
+                for j in jobs:
+                    for p in [j["path"]] + [sp for _n, sp in j["sample_paths"]]:
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+                return jsonify(ok=False, error="En körning pågår redan."), 409
+            DIARIZE_QUEUE.clear()
+            DIARIZE_RESULTS.clear()
+            _diarize_worker_on = True
+            start = True
+            JOB.update(state="loading_model", mode="diarize", stage="", progress=0.0,
+                       position=0.0, duration=0.0, text="", transcript="", error="",
+                       note="", filename=jobs[0]["filename"],
+                       queue=[], batch_index=0, batch_total=0, results=[])
+        DIARIZE_QUEUE.extend(jobs)
+        JOB["batch_total"] += len(jobs)
+        JOB["queue"] = [j["filename"] for j in DIARIZE_QUEUE]
+    if start:
+        threading.Thread(target=_diarize_worker, daemon=True).start()
+    return jsonify(ok=True, queued=len(jobs))
 
 
 @app.route("/analyze", methods=["POST"])
@@ -849,9 +936,12 @@ def reset():
     with LOCK:
         if _busy():
             return jsonify(ok=False), 409
+        DIARIZE_QUEUE.clear()
+        DIARIZE_RESULTS.clear()
         JOB.update(state="idle", mode="", stage="", progress=0.0, position=0.0, duration=0.0,
                    text="", transcript="", handoff_dir="", instruction="", command="",
-                   frames_count=0, project_dir="", filename="", error="", note="")
+                   frames_count=0, project_dir="", filename="", error="", note="",
+                   queue=[], batch_index=0, batch_total=0, results=[])
     return jsonify(ok=True)
 
 
@@ -963,6 +1053,15 @@ PAGE = r"""<!doctype html>
   button.ghost:hover{background:var(--accent-soft); border-color:var(--accent)}
   .notice{background:var(--accent-soft); border:1px solid var(--line); border-radius:9px;
     padding:9px 12px; font-size:12.5px; color:var(--ink); margin-bottom:10px; line-height:1.5}
+  /* Batch-kö (talaridentifiering) */
+  .queueinfo{font-size:12.5px; color:var(--muted); margin-top:12px; line-height:1.55; word-break:break-word}
+  .rlist{display:flex; flex-direction:column; gap:6px; margin-bottom:12px}
+  .ritem{display:flex; align-items:center; gap:8px; border:1px solid var(--line); border-radius:9px;
+    background:#fff; padding:8px 12px; font-size:13px}
+  .ritem.sel{border-color:var(--accent); background:var(--accent-soft)}
+  .ritem .fn{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; font-weight:550}
+  .ritem .fail{color:var(--danger); font-size:12px; white-space:nowrap}
+  .ritem .mini{padding:5px 10px; font-size:12px; white-space:nowrap}
 </style>
 </head>
 <body>
@@ -1078,10 +1177,10 @@ PAGE = r"""<!doctype html>
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
           </svg>
-          <div class="big">Dra in din ljudfil</div>
-          <div class="small">eller klicka för att välja · m4a, mp3, wav, mp4</div>
+          <div class="big">Dra in en eller flera ljudfiler</div>
+          <div class="small">eller klicka för att välja · flera filer köas och körs en i taget · m4a, mp3, wav, mp4</div>
         </label>
-        <input type="file" id="s_file" accept="audio/*,video/mp4,.m4a,.mp3,.wav,.mp4">
+        <input type="file" id="s_file" accept="audio/*,video/mp4,.m4a,.mp3,.wav,.mp4" multiple>
 
         <div class="who">
           <div class="who-head">Repliker märks automatiskt per talare (Talare 1, Talare 2 …).</div>
@@ -1099,13 +1198,20 @@ PAGE = r"""<!doctype html>
         <div class="name" id="s_name"></div>
         <div class="track"><div class="bar" id="s_bar"></div></div>
         <div class="meta"><span class="state" id="s_state"><span class="spinner"></span>Förbereder…</span><span id="s_time"></span></div>
+        <div class="queueinfo hidden" id="s_queue"></div>
+        <div class="actions" style="margin-top:14px">
+          <button class="btn" id="s_addMore">＋ Lägg till fler filer i kön</button>
+        </div>
+        <input type="file" id="s_moreFile" accept="audio/*,video/mp4,.m4a,.mp3,.wav,.mp4" multiple>
       </section>
       <section id="s_done" class="hidden">
+        <div class="rlist hidden" id="s_results"></div>
         <div class="name" id="s_doneName"></div>
         <div class="notice hidden" id="s_note"></div>
         <textarea id="s_out" spellcheck="false" style="height:300px"></textarea>
         <div class="actions">
           <button class="btn primary grow" id="s_download">Ladda ner .txt</button>
+          <button class="btn hidden" id="s_downloadAll">Ladda ner alla</button>
           <button class="btn" id="s_copy">Kopiera</button>
           <button class="btn" id="s_again">Ny fil</button>
         </div>
@@ -1282,8 +1388,8 @@ const sShow = id => ["s_idle","s_working","s_done","s_error"].forEach(x => $(x).
 const sDrop = $("s_drop"), sFile = $("s_file");
 ["dragenter","dragover"].forEach(e => sDrop.addEventListener(e, ev => {ev.preventDefault(); sDrop.classList.add("over");}));
 ["dragleave","drop"].forEach(e => sDrop.addEventListener(e, ev => {ev.preventDefault(); sDrop.classList.remove("over");}));
-sDrop.addEventListener("drop", ev => { const f = ev.dataTransfer.files[0]; if (f) sUpload(f); });
-sFile.addEventListener("change", () => { if (sFile.files[0]) sUpload(sFile.files[0]); });
+sDrop.addEventListener("drop", ev => { const fs = Array.from(ev.dataTransfer.files); if (fs.length) sUpload(fs); });
+sFile.addEventListener("change", () => { const fs = Array.from(sFile.files); if (fs.length) sUpload(fs); });
 
 function sAddPerson(){
   const row = document.createElement("div");
@@ -1317,18 +1423,88 @@ function sCollectSamples(){
   return out;
 }
 let sName = "transkribering";
-async function sUpload(file){
-  sName = file.name.replace(/\.[^.]+$/, "");
-  $("s_name").textContent = file.name; $("s_bar").style.width = "0%";
-  $("s_state").innerHTML = '<span class="spinner"></span>Förbereder…'; $("s_time").textContent = "";
-  sShow("s_working");
-  const fd = new FormData(); fd.append("file", file);
+function sMakeForm(files){
+  const fd = new FormData();
+  files.forEach(f => fd.append("file", f));
   sCollectSamples().forEach(s => { fd.append("sample_name", s.name); fd.append("sample_file", s.file); });
-  const r = await fetch("/diarize", {method:"POST", body:fd});
+  return fd;
+}
+async function sUpload(files){
+  const first = files[0];
+  sName = first.name.replace(/\.[^.]+$/, "");
+  $("s_name").textContent = first.name; $("s_bar").style.width = "0%";
+  $("s_state").innerHTML = '<span class="spinner"></span>Förbereder…'; $("s_time").textContent = "";
+  $("s_queue").textContent = ""; $("s_queue").classList.add("hidden");
+  sShow("s_working");
+  const r = await fetch("/diarize", {method:"POST", body:sMakeForm(files)});
   if (!r.ok){ const j = await r.json().catch(()=>({})); sFail(j.error || "Kunde inte starta."); return; }
   poll();
 }
+/* Lägg till fler filer i kön medan en körning pågår. */
+$("s_addMore").addEventListener("click", () => $("s_moreFile").click());
+$("s_moreFile").addEventListener("change", async () => {
+  const fs = Array.from($("s_moreFile").files);
+  $("s_moreFile").value = "";
+  if (!fs.length) return;
+  const r = await fetch("/diarize", {method:"POST", body:sMakeForm(fs)});
+  if (!r.ok){
+    const j = await r.json().catch(()=>({}));
+    $("s_queue").textContent = "Kunde inte lägga till: " + (j.error || "okänt fel");
+    $("s_queue").classList.remove("hidden");
+  }
+});
+function sQueueInfo(j){
+  const el = $("s_queue");
+  if ((j.batch_total||0) > 1){
+    let txt = "Fil " + (j.batch_index||0) + " av " + j.batch_total;
+    if (j.queue && j.queue.length) txt += " · i kö: " + j.queue.join(", ");
+    el.textContent = txt; el.classList.remove("hidden");
+  } else { el.textContent = ""; el.classList.add("hidden"); }
+}
 function sFail(msg){ $("s_errMsg").textContent = msg; sShow("s_error"); }
+/* Resultat för batch: lista med en rad per fil, klicka för att visa. */
+let sResults = [];
+function sSaveTxt(r){
+  const blob = new Blob([r.text], {type:"text/plain;charset=utf-8"});
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  a.download = r.filename.replace(/\.[^.]+$/, "") + ".txt"; a.click(); URL.revokeObjectURL(a.href);
+}
+function sSelectResult(i){
+  const r = sResults[i]; if (!r) return;
+  sName = r.filename.replace(/\.[^.]+$/, "");
+  $("s_doneName").textContent = r.filename;
+  $("s_out").value = r.error ? "" : r.text;
+  const note = $("s_note");
+  const msg = r.error ? ("Något gick fel med den här filen: " + r.error) : (r.note || "");
+  if (msg){ note.textContent = msg; note.classList.remove("hidden"); }
+  else { note.textContent = ""; note.classList.add("hidden"); }
+  document.querySelectorAll("#s_results .ritem").forEach((el, k) => el.classList.toggle("sel", k===i));
+}
+function sRenderResults(){
+  const list = $("s_results"); list.innerHTML = "";
+  sResults.forEach((r, i) => {
+    const row = document.createElement("div"); row.className = "ritem";
+    const fn = document.createElement("span"); fn.className = "fn"; fn.textContent = r.filename;
+    fn.addEventListener("click", () => sSelectResult(i));
+    row.appendChild(fn);
+    if (r.error){
+      const w = document.createElement("span"); w.className = "fail"; w.textContent = "⚠ misslyckades";
+      row.appendChild(w);
+    } else {
+      const dl = document.createElement("button"); dl.type = "button"; dl.className = "btn mini";
+      dl.textContent = "Ladda ner"; dl.addEventListener("click", () => sSaveTxt(r));
+      row.appendChild(dl);
+    }
+    list.appendChild(row);
+  });
+  list.classList.remove("hidden");
+  $("s_downloadAll").classList.remove("hidden");
+  let idx = sResults.findIndex(r => !r.error); if (idx < 0) idx = 0;
+  sSelectResult(idx);
+}
+$("s_downloadAll").addEventListener("click", () => {
+  sResults.filter(r => !r.error).forEach((r, k) => setTimeout(() => sSaveTxt(r), k*300));
+});
 $("s_download").addEventListener("click", () => {
   const blob = new Blob([$("s_out").value], {type:"text/plain;charset=utf-8"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = sName + ".txt"; a.click(); URL.revokeObjectURL(a.href);
@@ -1337,7 +1513,14 @@ $("s_copy").addEventListener("click", async () => {
   await navigator.clipboard.writeText($("s_out").value);
   $("s_copy").textContent = "Kopierat ✓"; setTimeout(() => $("s_copy").textContent = "Kopiera", 1500);
 });
-async function sReset(){ await fetch("/reset", {method:"POST"}); sFile.value=""; $("s_samples").innerHTML=""; sShow("s_idle"); }
+async function sReset(){
+  await fetch("/reset", {method:"POST"});
+  sFile.value=""; $("s_samples").innerHTML="";
+  sResults = []; $("s_results").innerHTML=""; $("s_results").classList.add("hidden");
+  $("s_downloadAll").classList.add("hidden");
+  $("s_queue").textContent=""; $("s_queue").classList.add("hidden");
+  sShow("s_idle");
+}
 $("s_again").addEventListener("click", sReset);
 $("s_retry").addEventListener("click", sReset);
 
@@ -1379,19 +1562,32 @@ function poll(){
     }
 
     if (j.mode === "diarize"){
+      if (j.filename) $("s_name").textContent = j.filename;
       if (j.state === "downloading"){
+        sQueueInfo(j);
         $("s_bar").style.width = pct+"%"; $("s_state").innerHTML='<span class="spinner"></span>Laddar ner KB-Whisper (engångs)…'; $("s_time").textContent=pct+"%"; poll();
       } else if (j.state === "loading_model"){
+        sQueueInfo(j);
         $("s_state").innerHTML='<span class="spinner"></span>Startar modellen…'; $("s_time").textContent=""; poll();
       } else if (j.state === "working"){
+        sQueueInfo(j);
         $("s_bar").style.width = pct+"%"; $("s_state").innerHTML='<span class="spinner"></span>Transkriberar…';
         $("s_time").textContent = j.duration ? (fmt(j.position)+" / "+fmt(j.duration)) : ""; poll();
       } else if (j.state === "diarizing"){
+        sQueueInfo(j);
         $("s_bar").style.width = "100%"; $("s_state").innerHTML='<span class="spinner"></span>Identifierar talare…'; $("s_time").textContent=""; poll();
       } else if (j.state === "done"){
-        $("s_bar").style.width="100%"; $("s_out").value=j.text; $("s_doneName").textContent=j.filename;
-        const note=$("s_note");
-        if (j.note){ note.textContent=j.note; note.classList.remove("hidden"); } else { note.textContent=""; note.classList.add("hidden"); }
+        $("s_bar").style.width="100%";
+        sResults = j.results || [];
+        if (sResults.length > 1){
+          sRenderResults();
+        } else {
+          $("s_results").innerHTML=""; $("s_results").classList.add("hidden");
+          $("s_downloadAll").classList.add("hidden");
+          $("s_out").value=j.text; $("s_doneName").textContent=j.filename;
+          const note=$("s_note");
+          if (j.note){ note.textContent=j.note; note.classList.remove("hidden"); } else { note.textContent=""; note.classList.add("hidden"); }
+        }
         sShow("s_done");
       } else if (j.state === "error"){ sFail(j.error || "Något gick fel."); }
       else { poll(); }

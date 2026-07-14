@@ -8,6 +8,7 @@ Appen har tre flikar:
 - **Felsökning** — spela in skärm + röst för en webbplats → färdig handoff till Claude.
 - **Transkribera** — dra in en ljudfil → ren text.
 - **Talaridentifiering** — text märkt per talare ("Talare 1", "Talare 2" …).
+  Flera mötesinspelningar kan laddas upp samtidigt; de köas och körs en i taget.
 
 ## Så här gör du
 
