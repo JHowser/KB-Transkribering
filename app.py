@@ -16,6 +16,7 @@ Appen samlar tre lägen under varsin flik:
 
 import os
 import io
+import sys
 import json
 import time
 import shutil
@@ -39,6 +40,128 @@ CONFIG_PATH = os.path.join(HERE, ".felsokning_config.json")
 SESSIONS_DIR = os.path.join(HERE, "sessions")
 PORT = 8723
 SR = 16000
+
+# ── Plattform: appen körs på både macOS och Windows (och Linux i mån av mån) ──
+# Skärminspelning och röstdiktering sker i webbläsaren och är plattformsoberoende;
+# det är bara systemintegrationerna nedan (mappväljare, öppna mapp, öppna Terminal)
+# som behöver skilja på operativsystem.
+IS_WINDOWS = os.name == "nt"
+IS_MAC = sys.platform == "darwin"
+IS_LINUX = not IS_WINDOWS and not IS_MAC
+
+
+def _pick_folder_dialog():
+    """Öppna en native mappväljare för aktuellt OS. Returnerar vald sökväg eller ''.
+    macOS -> osascript, Windows -> PowerShell, Linux -> zenity/kdialog. Faller
+    tillbaka på en Tk-dialog (följer med Python) om det native verktyget saknas."""
+    try:
+        if IS_MAC:
+            script = 'POSIX path of (choose folder with prompt "Välj din projektmapp")'
+            out = subprocess.run(["osascript", "-e", script],
+                                 capture_output=True, text=True, timeout=300)
+            path = (out.stdout or "").strip().rstrip("/")
+            if path:
+                return path
+        elif IS_WINDOWS:
+            # PowerShells mappväljare kräver inga extra beroenden.
+            ps = (
+                "Add-Type -AssemblyName System.Windows.Forms | Out-Null;"
+                "$f = New-Object System.Windows.Forms.FolderBrowserDialog;"
+                "$f.Description = 'Välj din projektmapp';"
+                "$f.ShowNewFolderButton = $true;"
+                "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK)"
+                " { [Console]::Out.Write($f.SelectedPath) }"
+            )
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-STA", "-Command", ps],
+                capture_output=True, text=True, timeout=300)
+            path = (out.stdout or "").strip()
+            if path:
+                return path
+        else:
+            for cmd in (["zenity", "--file-selection", "--directory",
+                         "--title=Välj din projektmapp"],
+                        ["kdialog", "--getexistingdirectory",
+                         os.path.expanduser("~")]):
+                try:
+                    out = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                    path = (out.stdout or "").strip().rstrip("/")
+                    if path:
+                        return path
+                except FileNotFoundError:
+                    continue
+    except Exception:  # noqa: BLE001 — faller vidare till Tk-reserven nedan.
+        pass
+
+    # Universell reserv: Tk följer med Python. Körs i en egen process så den inte
+    # krockar med Flasks trådar (Tk måste ligga på huvudtråden på macOS).
+    try:
+        code = (
+            "import tkinter as tk\n"
+            "from tkinter import filedialog\n"
+            "r = tk.Tk(); r.withdraw()\n"
+            "try:\n"
+            "    r.attributes('-topmost', True)\n"
+            "except Exception:\n"
+            "    pass\n"
+            "p = filedialog.askdirectory(title='Välj din projektmapp')\n"
+            "import sys; sys.stdout.write(p or '')\n"
+        )
+        out = subprocess.run([sys.executable, "-c", code],
+                             capture_output=True, text=True, timeout=300)
+        return (out.stdout or "").strip().rstrip("/")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _open_in_file_manager(path):
+    """Öppna en mapp i systemets filhanterare (Finder / Utforskaren / filhanterare)."""
+    if IS_MAC:
+        subprocess.run(["open", path])
+    elif IS_WINDOWS:
+        os.startfile(path)  # noqa: SLF001 — Windows-specifik, finns bara där.
+    else:
+        subprocess.run(["xdg-open", path])
+
+
+def _claude_command(project_dir, instruction):
+    """Bygg ett färdigt CLI-kommando som startar Claude Code i projektmappen.
+    På Windows behövs 'cd /d' för att kunna byta enhet (t.ex. C: -> D:)."""
+    cd = 'cd /d "{}"'.format(project_dir) if IS_WINDOWS else 'cd "{}"'.format(project_dir)
+    return '{} && claude "{}"'.format(cd, instruction)
+
+
+def _open_terminal_with_command(command, cwd=None):
+    """Öppna ett terminalfönster och kör ett kommando. Best-effort per OS."""
+    if IS_MAC:
+        esc = command.replace("\\", "\\\\").replace('"', '\\"')
+        subprocess.run(["osascript",
+                        "-e", 'tell application "Terminal" to do script "{}"'.format(esc),
+                        "-e", 'tell application "Terminal" to activate'])
+        return True
+    if IS_WINDOWS:
+        # Skriv kommandot till en tillfällig .bat-fil så vi slipper trassla med
+        # citattecken inuti 'start ... cmd /k'. Fönstret stannar öppet (cmd /k).
+        fd, bat = tempfile.mkstemp(suffix=".bat", prefix="kb_claude_")
+        os.close(fd)
+        with open(bat, "w", encoding="utf-8") as fh:
+            fh.write("@echo off\r\n" + command + "\r\n")
+        subprocess.Popen(
+            'start "KB Transkribering" cmd /k "{}"'.format(bat), shell=True)
+        return True
+    # Linux: prova vanliga terminaler i tur och ordning.
+    for term in (
+        ["gnome-terminal", "--", "bash", "-lc", command + "; exec bash"],
+        ["konsole", "-e", "bash", "-lc", command + "; exec bash"],
+        ["x-terminal-emulator", "-e", "bash", "-lc", command + "; exec bash"],
+        ["xterm", "-e", "bash", "-lc", command + "; exec bash"],
+    ):
+        try:
+            subprocess.Popen(term, cwd=cwd or None)
+            return True
+        except FileNotFoundError:
+            continue
+    return False
 
 # Skärmbilder (felsökningsläget): minsta avstånd mellan utklipp (så varje replik får
 # en egen bild men nära dubbletter undviks), maxantal, och nedskalning.
@@ -163,7 +286,8 @@ def _load_model():
         if not os.path.exists(MODEL_PATH):
             _download_model()
         from pywhispercpp.model import Model
-        # whisper.cpp byggs med Metal som standard på Apple Silicon -> körs på GPU.
+        # whisper.cpp byggs med Metal som standard på Apple Silicon (GPU); på Windows
+        # och Linux körs samma modell på CPU (eller CUDA om det byggts med stöd).
         _model = Model(MODEL_PATH, print_realtime=False, print_progress=False)
     return _model
 
@@ -565,7 +689,7 @@ def _prepare_handoff(video_path, session_dir, video_ext):
         handoff, nframes = _write_handoff(target_root, segments, items, frames_flat, video_path, video_ext)
 
         if use_project:
-            command = 'cd "{}" && claude "{}"'.format(project, INSTRUCTION)
+            command = _claude_command(project, INSTRUCTION)
             instruction = INSTRUCTION
         else:
             instruction = ('Read the context.md in "{}", view the screenshots in its frames/ '
@@ -609,11 +733,9 @@ def config():
 
 @app.route("/pick-folder", methods=["POST"])
 def pick_folder():
-    """Öppna en native mappväljare (macOS) och spara valet."""
+    """Öppna en native mappväljare (macOS/Windows/Linux) och spara valet."""
     try:
-        script = 'POSIX path of (choose folder with prompt "Välj din projektmapp")'
-        out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=180)
-        path = (out.stdout or "").strip().rstrip("/")
+        path = _pick_folder_dialog()
         if path:
             _save_config(project_dir=path)
             return jsonify(ok=True, project_dir=path, valid=os.path.isdir(path))
@@ -628,7 +750,7 @@ def open_folder():
     path = data.get("path") or ""
     if path and os.path.isdir(path):
         try:
-            subprocess.run(["open", path])
+            _open_in_file_manager(path)
             return jsonify(ok=True)
         except Exception as exc:  # noqa: BLE001
             return jsonify(ok=False, error=str(exc))
@@ -637,17 +759,15 @@ def open_folder():
 
 @app.route("/open-claude", methods=["POST"])
 def open_claude():
-    """Bäst-effort: öppna Terminal i projektmappen och kör Claude Code."""
+    """Bäst-effort: öppna en terminal i projektmappen och kör Claude Code."""
     data = request.get_json(silent=True) or {}
     command = data.get("command") or ""
     if not command:
         return jsonify(ok=False, error="Inget kommando."), 400
     try:
-        esc = command.replace("\\", "\\\\").replace('"', '\\"')
-        subprocess.run(["osascript",
-                        "-e", 'tell application "Terminal" to do script "{}"'.format(esc),
-                        "-e", 'tell application "Terminal" to activate'])
-        return jsonify(ok=True)
+        if _open_terminal_with_command(command):
+            return jsonify(ok=True)
+        return jsonify(ok=False, error="Hittade ingen terminal att öppna.")
     except Exception as exc:  # noqa: BLE001
         return jsonify(ok=False, error=str(exc))
 
@@ -1051,7 +1171,7 @@ async function startSession(){
     screenStream = await navigator.mediaDevices.getDisplayMedia({video:{frameRate:10}, audio:false});
   }catch(e){
     resetStartBtn();
-    setPermHint("Skärmdelningen avbröts. Klicka Starta igen och välj fönstret eller fliken med din webbplats. På Mac kan du behöva tillåta webbläsaren under Systeminställningar → Integritet & säkerhet → Skärminspelning.", true);
+    setPermHint("Skärmdelningen avbröts. Klicka Starta igen och välj fönstret eller fliken med din webbplats. På Mac kan du behöva tillåta webbläsaren under Systeminställningar → Integritet & säkerhet → Skärminspelning. På Windows: tillåt skärmdelning i webbläsarens dialog.", true);
     return;
   }
   btn.textContent = "Väntar på mikrofon…";
@@ -1123,7 +1243,7 @@ $("d_openFolder").addEventListener("click", async () => {
 $("d_openClaude").addEventListener("click", async () => {
   if (!doneData.command){ $("d_copyMsg").textContent = "Välj en projektmapp först för att kunna starta Claude Code direkt."; return; }
   const j = await (await fetch("/open-claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({command:doneData.command})})).json();
-  $("d_copyMsg").textContent = j.ok ? "Öppnar Claude Code i Terminal…" : ("Kunde inte öppna: " + (j.error||""));
+  $("d_copyMsg").textContent = j.ok ? "Öppnar Claude Code i en terminal…" : ("Kunde inte öppna: " + (j.error||""));
 });
 
 /* ── Transkribering ── */
