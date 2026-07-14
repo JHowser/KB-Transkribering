@@ -1,8 +1,8 @@
 # KB Transkribering
 
-Lokal transkribering av svenska inspelningar på din Mac med **KB-Whisper (large)**. Körs
-på din GPU via Metal (whisper.cpp) — **inget ljud lämnar datorn**. Allt samlas i **en app
-med tre flikar**:
+Lokal transkribering av svenska inspelningar med **KB-Whisper (large)**. Fungerar på
+**Mac och Windows** — **inget ljud lämnar datorn**. På Mac körs modellen på din GPU via
+Metal (whisper.cpp); på Windows körs den på CPU. Allt samlas i **en app med tre flikar**:
 
 - **Felsökning** — spela in skärm + röst medan du går igenom en webbplats, peka ut problemen
   högt. Rösten transkriberas med tidsstämplar, skärmbilder klipps ut vid rätt ögonblick och
@@ -14,7 +14,12 @@ med tre flikar**:
 ## Kom igång
 
 1. **Installera Python 3** (en gång): https://www.python.org/downloads/
-2. Dubbelklicka på **Starta Transkribering.command** (första gången: högerklicka → **Öppna**).
+   På **Windows**: kryssa i **"Add Python to PATH"** i installeraren.
+2. Starta appen:
+   - **Mac:** dubbelklicka på **Starta Transkribering.command** (första gången:
+     högerklicka → **Öppna**).
+   - **Windows:** dubbelklicka på **Starta Transkribering.bat** (visas en
+     SmartScreen-varning: **Mer information** → **Kör ändå**).
 3. Ett fönster öppnas i webbläsaren med de tre flikarna. Välj **Felsökning** för att spela in
    skärm + röst, eller **Transkribera** / **Talaridentifiering** för att ladda upp en
    röstinspelning (m4a, mp3, wav, mp4).
@@ -118,6 +123,19 @@ Första gången kan du behöva tillåta webbläsaren under Systeminställningar 
 säkerhet → Skärminspelning. Dela **fönstret med webbplatsen**, inte appfliken. Väljer du
 ingen projektmapp hamnar handoffen i appens egen `sessions/`-mapp istället.
 
+## Windows: bra att veta
+
+- **Skärminspelning** (fliken Felsökning) och **röstinspelning** sker i webbläsaren och
+  fungerar direkt. Använd helst **Google Chrome** eller **Microsoft Edge**. Första gången
+  frågar Windows om åtkomst till mikrofon (och webbläsaren om skärmdelning) — tillåt det.
+- När du delar skärm, välj **fönstret eller fliken med din webbplats** — inte hela skärmen —
+  för skarpast skärmbilder.
+- Knapparna **Öppna mappen** (öppnar Utforskaren) och **Öppna i Claude Code** (öppnar ett
+  Kommandotolk-fönster i projektmappen och kör `claude`) fungerar likadant som på Mac. För
+  **Öppna i Claude Code** behöver Claude Code vara installerat och nåbart som kommandot
+  `claude` i PATH.
+- Modellen körs på **CPU** på Windows, så transkriberingen tar längre tid än på en Mac med GPU.
+
 ## Viktigt för Mac-användare: stäng av Rosetta
 
 För att appen ska fungera och kunna kopplas till **Genvägar (Shortcuts)** måste den köras
@@ -131,7 +149,8 @@ Om "Öppna med Rosetta" är ikryssad kan kopplingen till Genvägar sluta fungera
 
 ## Filer
 
-- `Starta Transkribering.command` — det du dubbelklickar på.
+- `Starta Transkribering.command` — det du dubbelklickar på (Mac).
+- `Starta Transkribering.bat` — det du dubbelklickar på (Windows).
 - `app.py` — själva programmet (Flask-server + webbgränssnitt).
 - `diarize.py` — talardiarisering (pyannote).
 - `enroll.py` — röstprover och namnmatchning (ECAPA-TDNN).
