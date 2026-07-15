@@ -11,7 +11,11 @@ Metal (whisper.cpp); på Windows körs den på CPU. Allt samlas i **en app med t
 - **Talaridentifiering** — som Transkribera, men texten märks per talare ("Talare 1",
   "Talare 2" …) med diarisering. Valfria röstprover ger riktiga namn (se nedan).
   Flera mötesinspelningar kan laddas upp samtidigt — de läggs i en kö och körs en i
-  taget, praktiskt för nattkörningar.
+  taget, praktiskt för nattkörningar (se nedan).
+
+Dessutom finns **Spela in.html** — en fristående inspelare som spelar in **skärm + röst**
+direkt i webbläsaren och sparar en videofil, **utan** Python, modeller eller installation
+(se nedan).
 
 ## Kom igång
 
@@ -58,6 +62,21 @@ Diarisering ("vem talar när") är **språkoberoende** — den arbetar på röst
 inte på orden — så det finns ingen svensk-specifik talarmodell. KB-Whisper sköter
 orden, en allmän diariseringsmodell (`pyannote/speaker-diarization-3.1`) sköter
 talarna, och de vävs ihop på tidsstämplarna. Allt körs lokalt.
+
+### Flera möten på en gång (kö)
+
+Talaridentifiering kan ta lång tid, så fliken har en **batch-kö** — perfekt att starta
+på kvällen och låta gå över natten:
+
+- Dra in **flera filer på en gång** (eller markera flera i filväljaren). De läggs i en
+  kö och körs **en i taget**; under körningen ser du vilken fil som bearbetas och vad
+  som väntar ("Fil 2 av 4 · i kö: …").
+- Du kan **lägga till fler filer i kön medan den kör** med knappen
+  **"＋ Lägg till fler filer i kön"**.
+- När allt är klart visas en **lista med ett resultat per fil**: klicka på en fil för att
+  läsa texten, ladda ner varje transkript för sig eller ta allt med **"Ladda ner alla"**.
+- Ett fel i en fil stoppar **inte** resten av kön — filen markeras som misslyckad och
+  nästa körs. Röstprover du lagt till gäller alla filer i samma uppladdning.
 
 ### Riktiga namn i stället för "Talare 1" (valfritt)
 
@@ -125,6 +144,25 @@ Första gången kan du behöva tillåta webbläsaren under Systeminställningar 
 säkerhet → Skärminspelning. Dela **fönstret med webbplatsen**, inte appfliken. Väljer du
 ingen projektmapp hamnar handoffen i appens egen `sessions/`-mapp istället.
 
+## Spela in: fristående skärm- och röstinspelare (ingen installation)
+
+**Spela in.html** är en fristående inspelare för den som **bara vill spela in** — inget
+Python, inga modeller, ingen installation. Perfekt att skicka till någon som ska visa
+ett problem eller spela in ett möte åt dig:
+
+1. Dubbelklicka på **Spela in.html** (eller högerklicka → öppna med **Google Chrome**
+   eller **Microsoft Edge**).
+2. Klicka **● Starta inspelning**, tillåt mikrofonen och välj **fönstret eller fliken**
+   du vill visa. Prata högt medan du klickar runt — skärm och röst spelas in tillsammans.
+3. Klicka **■ Stoppa & spara** (eller webbläsarens egen "Sluta dela"-knapp — då sparas
+   inspelningen också). En videofil (`inspelning ÅÅÅÅ-MM-DD TT.MM.webm`) hamnar i din
+   **Hämtade filer**-mapp (Downloads), redo att t.ex. laddas upp till Google Drive eller
+   dras in i den här appen för transkribering.
+
+Allt sker lokalt i webbläsaren — **inget skickas någonstans automatiskt**. Missade
+nedladdningen? Klicka **Spara igen**. Stänger du fliken mitt i en inspelning varnar sidan
+först.
+
 ## Windows: bra att veta
 
 - **Skärminspelning** (fliken Felsökning) och **röstinspelning** sker i webbläsaren och
@@ -153,6 +191,8 @@ Om "Öppna med Rosetta" är ikryssad kan kopplingen till Genvägar sluta fungera
 
 - `Starta Transkribering.command` — det du dubbelklickar på (Mac).
 - `Starta Transkribering.bat` — det du dubbelklickar på (Windows).
+- `Spela in.html` — fristående skärm- och röstinspelare; öppnas direkt i webbläsaren,
+  kräver varken Python eller modeller.
 - `app.py` — själva programmet (Flask-server + webbgränssnitt).
 - `diarize.py` — talardiarisering (pyannote).
 - `enroll.py` — röstprover och namnmatchning (ECAPA-TDNN).

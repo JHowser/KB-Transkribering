@@ -10,6 +10,10 @@ Appen har tre flikar:
 - **Talaridentifiering** — text märkt per talare ("Talare 1", "Talare 2" …).
   Flera mötesinspelningar kan laddas upp samtidigt; de köas och körs en i taget.
 
+Vill du **bara spela in** skärm + röst (utan att installera något)? Dubbelklicka på
+**Spela in.html** — den öppnas i webbläsaren och sparar en videofil i Hämtade filer
+när du stoppar. Ingen Python behövs.
+
 ## Så här gör du
 
 1. **En gång:** installera Python 3 om du inte redan har det:
@@ -43,6 +47,7 @@ Appen har tre flikar:
 
 - `Starta Transkribering.command` — det du dubbelklickar på (Mac).
 - `Starta Transkribering.bat` — det du dubbelklickar på (Windows).
+- `Spela in.html` — fristående inspelare (skärm + röst) som öppnas direkt i webbläsaren.
 - `app.py` — själva programmet.
 - `model/` — modellen sparas här efter första nedladdningen.
 - `.venv/` — skapas automatiskt (rör den inte).
