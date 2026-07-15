@@ -10,6 +10,8 @@ Metal (whisper.cpp); på Windows körs den på CPU. Allt samlas i **en app med t
 - **Transkribera** — dra in en mötesinspelning (m4a, mp3, wav, mp4) och få tillbaka ren text.
 - **Talaridentifiering** — som Transkribera, men texten märks per talare ("Talare 1",
   "Talare 2" …) med diarisering. Valfria röstprover ger riktiga namn (se nedan).
+  Flera mötesinspelningar kan laddas upp samtidigt — de läggs i en kö och körs en i
+  taget, praktiskt för nattkörningar.
 
 ## Kom igång
 
