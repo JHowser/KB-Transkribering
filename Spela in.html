@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spela in</title>
+<style>
+  :root{
+    --paper:#EAEEEF; --card:#FBFCFC; --ink:#16252B; --muted:#5E6E74;
+    --line:#D3DADC; --accent:#1F5C73; --accent-soft:#D7E5EA; --danger:#9B3B2E;
+    --ok:#2E7D5B; --rec:#C4453A;
+    --display:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,ui-serif,serif;
+    --ui:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%}
+  body{background:var(--paper); color:var(--ink); font-family:var(--ui);
+    display:flex; align-items:flex-start; justify-content:center; padding:32px; -webkit-font-smoothing:antialiased;}
+  .card{width:100%; max-width:560px; background:var(--card); border:1px solid var(--line);
+    border-radius:14px; padding:30px 34px 26px; box-shadow:0 1px 0 #fff inset, 0 18px 50px -28px rgba(22,37,43,.35);}
+  .brand{display:flex; align-items:baseline; gap:10px; margin-bottom:14px}
+  .brand h1{font-family:var(--display); font-weight:600; font-size:24px; letter-spacing:.2px; margin:0}
+  .brand .tag{font-size:12px; color:var(--muted); letter-spacing:.04em; text-transform:uppercase}
+  .sub{color:var(--muted); font-size:13.5px; margin:0 0 22px; line-height:1.55}
+  .actions{display:flex; gap:10px; margin-top:16px; flex-wrap:wrap}
+  button.btn{font-family:var(--ui); font-size:14px; font-weight:550; cursor:pointer; border-radius:9px;
+    padding:12px 16px; border:1px solid var(--line); background:#fff; color:var(--ink); transition:background .12s ease;}
+  button.btn:hover{background:#F2F5F6}
+  button.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  button.primary:hover{background:#1A4F62}
+  button.rec{background:var(--rec); border-color:var(--rec); color:#fff}
+  button.rec:hover{background:#A93A30}
+  button:disabled{opacity:.5; cursor:not-allowed}
+  .grow{flex:1}
+  .hidden{display:none}
+  .hint{font-size:12.5px; color:var(--muted); line-height:1.55; margin:12px 0 0}
+  .err-hint{color:var(--danger); font-weight:500; font-size:13px}
+  .rec-dot{display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--rec); margin-right:7px;
+    vertical-align:1px; animation:pulse 1.1s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  .timer{font-family:var(--display); font-size:44px; font-weight:600; text-align:center; margin:16px 0 2px; letter-spacing:1px}
+  .reclabel{text-align:center; font-size:13px; color:var(--muted); margin-bottom:18px}
+  .donebox{background:#F0F6F3; border:1px solid var(--line); border-radius:11px; padding:16px 18px; margin-top:4px}
+  .donebox .big{font-size:15px; font-weight:600; color:var(--ok); margin-bottom:6px}
+  .donebox .fname{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; color:var(--ink);
+    word-break:break-all; margin-bottom:8px}
+  .donebox .next{font-size:13px; color:var(--muted); line-height:1.55}
+  .foot{margin-top:22px; font-size:11.5px; color:var(--muted); text-align:center; letter-spacing:.02em}
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="brand"><h1>Spela in</h1><span class="tag">Skärm + röst</span></div>
+
+    <!-- Startläge -->
+    <section id="idle">
+      <p class="sub">Spelar in skärmen och din röst. När du stoppar sparas en videofil
+        i din <b>Hämtade filer</b>-mapp (Downloads) — ladda upp den till Google Drive.</p>
+      <div class="hint" style="margin-top:0">
+        Klicka <b>Starta inspelning</b>, tillåt mikrofonen, och välj <b>fönstret eller fliken</b>
+        du vill visa. Prata högt medan du klickar runt.
+      </div>
+      <div class="actions">
+        <button class="btn rec grow" id="startRec">● Starta inspelning</button>
+      </div>
+      <p class="hint" id="permHint"></p>
+    </section>
+
+    <!-- Inspelning pågår -->
+    <section id="rec" class="hidden">
+      <div class="timer" id="timer">0:00</div>
+      <div class="reclabel"><span class="rec-dot"></span>Spelar in… beskriv högt vad du ser</div>
+      <div class="actions">
+        <button class="btn primary grow" id="stopRec">■ Stoppa &amp; spara</button>
+        <button class="btn" id="cancelRec">Avbryt</button>
+      </div>
+    </section>
+
+    <!-- Klart -->
+    <section id="done" class="hidden">
+      <div class="donebox">
+        <div class="big">✓ Sparad i Hämtade filer</div>
+        <div class="fname" id="doneName"></div>
+        <div class="next">Ladda nu upp filen till <b>Google Drive</b> så är du klar.</div>
+      </div>
+      <div class="actions">
+        <button class="btn" id="saveAgain">Spara igen</button>
+        <button class="btn primary grow" id="again">Ny inspelning</button>
+      </div>
+    </section>
+
+    <div class="foot">Allt sker lokalt i webbläsaren · inget skickas någonstans automatiskt</div>
+  </main>
+
+<script>
+const $ = id => document.getElementById(id);
+const show = id => ["idle","rec","done"].forEach(s => $(s).classList.toggle("hidden", s !== id));
+const fmt = s => { s = Math.max(0, Math.round(s||0)); return Math.floor(s/60) + ":" + String(s%60).padStart(2,"0"); };
+
+let micStream, screenStream, mediaRecorder, chunks = [];
+let startTime = 0, timerInt = null, recMime = "video/webm", recExt = "webm";
+let lastBlob = null, lastName = "";
+
+function setPermHint(msg, isError){
+  const el = $("permHint");
+  el.textContent = msg;
+  el.classList.toggle("err-hint", !!isError && !!msg);
+}
+function resetStartBtn(){
+  const b = $("startRec");
+  b.disabled = false;
+  b.textContent = "● Starta inspelning";
+}
+
+$("startRec").addEventListener("click", start);
+async function start(){
+  const btn = $("startRec");
+  setPermHint("");
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia ||
+      !navigator.mediaDevices.getDisplayMedia || typeof MediaRecorder === "undefined"){
+    setPermHint("Den här webbläsaren stöder inte skärminspelning. Högerklicka på filen och öppna den med Google Chrome eller Microsoft Edge.", true);
+    return;
+  }
+  btn.disabled = true; btn.textContent = "Väljer fönster att dela…";
+  try{
+    screenStream = await navigator.mediaDevices.getDisplayMedia({video:{frameRate:10}, audio:false});
+  }catch(e){
+    resetStartBtn();
+    setPermHint("Skärmdelningen avbröts. Klicka Starta igen och välj fönstret eller fliken du vill visa.", true);
+    return;
+  }
+  btn.textContent = "Väntar på mikrofon…";
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({audio:true});
+  }catch(e){
+    try{ screenStream.getTracks().forEach(t => t.stop()); }catch(_){}
+    resetStartBtn();
+    setPermHint("Kunde inte komma åt mikrofonen. Tillåt mikrofon för webbläsaren och försök igen.", true);
+    return;
+  }
+  const combined = new MediaStream([...screenStream.getVideoTracks(), ...micStream.getAudioTracks()]);
+  const prefs = ["video/webm;codecs=vp9,opus","video/webm;codecs=vp8,opus","video/webm","video/mp4"];
+  recMime = "";
+  for (const m of prefs){ if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)){ recMime = m; break; } }
+  recExt = (recMime.indexOf("mp4") >= 0) ? "mp4" : "webm";
+  chunks = [];
+  try{ mediaRecorder = recMime ? new MediaRecorder(combined, {mimeType:recMime}) : new MediaRecorder(combined); }
+  catch(e){ mediaRecorder = new MediaRecorder(combined); }
+  mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  // Om användaren stoppar delningen via webbläsarens egen "Sluta dela"-knapp: spara ändå.
+  screenStream.getVideoTracks()[0].addEventListener("ended", () => {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") $("stopRec").click();
+  });
+  mediaRecorder.start(1000);
+  startTime = Date.now(); $("timer").textContent = "0:00";
+  clearInterval(timerInt);
+  timerInt = setInterval(() => { $("timer").textContent = fmt((Date.now() - startTime)/1000); }, 500);
+  resetStartBtn();
+  show("rec");
+}
+
+$("cancelRec").addEventListener("click", () => {
+  try{ mediaRecorder && mediaRecorder.state !== "inactive" && mediaRecorder.stop(); }catch(e){}
+  teardown();
+  show("idle");
+});
+
+let stopping = false;
+$("stopRec").addEventListener("click", async () => {
+  if (stopping) return;
+  stopping = true;
+  const blob = await stopAndGetVideo();
+  teardown();
+  save(blob);
+  stopping = false;
+});
+
+function stopAndGetVideo(){
+  const type = (recMime || "video/webm").split(";")[0];
+  return new Promise(resolve => {
+    if (!mediaRecorder || mediaRecorder.state === "inactive"){ resolve(new Blob(chunks, {type})); return; }
+    mediaRecorder.onstop = () => resolve(new Blob(chunks, {type}));
+    mediaRecorder.stop();
+  });
+}
+function teardown(){
+  clearInterval(timerInt);
+  try{ micStream && micStream.getTracks().forEach(t => t.stop()); }catch(e){}
+  try{ screenStream && screenStream.getTracks().forEach(t => t.stop()); }catch(e){}
+}
+
+function stamp(){
+  const d = new Date(), p = n => String(n).padStart(2,"0");
+  return d.getFullYear() + "-" + p(d.getMonth()+1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + "." + p(d.getMinutes());
+}
+function save(blob){
+  lastBlob = blob;
+  lastName = "inspelning " + stamp() + "." + recExt;
+  download();
+  $("doneName").textContent = lastName;
+  show("done");
+}
+function download(){
+  if (!lastBlob) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(lastBlob);
+  a.download = lastName;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+$("saveAgain").addEventListener("click", download);
+$("again").addEventListener("click", () => { lastBlob = null; setPermHint(""); show("idle"); });
+
+// Varna om man stänger fliken mitt i en inspelning.
+window.addEventListener("beforeunload", e => {
+  if (mediaRecorder && mediaRecorder.state !== "inactive"){ e.preventDefault(); e.returnValue = ""; }
+});
+</script>
+</body>
+</html>
